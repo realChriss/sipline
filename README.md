@@ -6,9 +6,11 @@ A small in-memory token-bucket rate limiter. Apps on the same machine connect ov
 
 ```sh
 go build .                                              # current platform
-build.bat                                               # all platforms -> dist/
+build.sh / build.bat                                    # all platforms -> dist/
 go test ./...
 ```
+
+`sh release.sh` picks the next version, tags `main` and pushes the tag. GitHub Actions then builds all platforms and publishes a release.
 
 ## Run
 
