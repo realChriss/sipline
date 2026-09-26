@@ -2,32 +2,50 @@
 
 A small in-memory token-bucket rate limiter. Apps on the same machine connect over TCP, send a key (usually a client IP) and get back whether the request is allowed. It's one Go binary that uses only the standard library.
 
+## Run with Docker Compose
+
+```sh
+mkdir sipline && cd sipline
+curl -fsSL -o docker-compose.yaml https://raw.githubusercontent.com/realChriss/sipline/main/docker-compose.prod.yaml
+docker compose up -d
+```
+
+This starts `ghcr.io/realchriss/sipline:latest` on `127.0.0.1:7700`. Keep the `127.0.0.1:` prefix in `ports` unless remote clients should reach it, because there is no auth.
+
+Without Compose:
+
+```sh
+docker run -d -p 127.0.0.1:7700:7700 ghcr.io/realchriss/sipline
+```
+
+## Configuration
+
+Configure the server with environment variables:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SIPLINE_ADDR` | `127.0.0.1:7700` (`0.0.0.0:7700` in Docker) | Address to listen on. `0.0.0.0:7700` accepts remote clients (no auth! firewall it). |
+| `SIPLINE_SWEEP` | `60s` | How often idle buckets are evicted. |
+| `SIPLINE_LOG` | empty | File to append logs to, including every request. |
+
+In Docker, point `SIPLINE_LOG` into a mounted directory, as the commented lines in `docker-compose.prod.yaml` show.
+
+Without `SIPLINE_LOG`, the server prints only its startup line and errors to stderr. With it, the file gets those lines plus one line per connection, disconnection and request:
+
+```
+2026/09/26 17:35:55 127.0.0.1:50344 "TAKE api 1.2.3.4" ALLOW 2
+```
+
+The file is written in batches and flushed every second and on shutdown, so a crash can lose the last second of lines. There is no rotation, so the file grows until you delete or rotate it yourself. Request logging slows the server down under heavy load.
+
 ## Build
 
 ```sh
 go build .                                              # current platform
 build.sh / build.bat                                    # all platforms -> dist/
 go test ./...
+SIPLINE_SWEEP=30s ./sipline                             # run the binary
 ```
-
-`sh release.sh` picks the next version, tags `main` and pushes the tag. GitHub Actions then builds all platforms and publishes a release.
-
-## Run
-
-```sh
-sipline                        # listens on 127.0.0.1:7700
-sipline --addr 0.0.0.0:7700    # accept remote clients (no auth! firewall it)
-sipline --sweep 30s            # evict idle buckets every 30s (default 60s)
-sipline --log sipline.log      # also append logs, including every request, to a file
-```
-
-Without `--log`, the server prints only its startup line and errors to stderr. With `--log`, the file gets those lines plus one line per connection, disconnection and request:
-
-```
-2026/09/26 17:35:55 127.0.0.1:50344 "TAKE api 1.2.3.4" ALLOW 2
-```
-
-The file is written in batches and flushed every second and on Ctrl+C, so a crash can lose the last second of lines. There is no rotation, so the file grows until you delete or rotate it yourself. Request logging slows the server down under heavy load.
 
 ## Protocol
 
@@ -39,11 +57,7 @@ Send one command per line and get one reply per line back, in order. You can pip
 | `TAKE <limiter> <key>` | `ALLOW <remaining>` / `DENY <retry_ms>` |
 | `PING` | `PONG` |
 
-`capacity` and `refill_per_sec` are whole numbers from 1 to 1000000. Anything else, such as `0.5`, `1e3` or `+1`, is rejected. The server holds at most 1000 limiters and never deletes them.
-
 Errors are `ERR unknown command`, `ERR bad arguments`, `ERR unknown limiter`, `ERR too many limiters` and `ERR line too long` (the last one also closes the connection).
-
-The server accepts at most 1000 connections at once. Beyond that, a new connection gets `ERR too many connections` and is closed. Idle connections stay open; TCP keepalive closes connections to clients that have died.
 
 ```
 > CONFIG api 3 1

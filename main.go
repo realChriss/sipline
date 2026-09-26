@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -71,13 +70,15 @@ func (l *logFile) writer(flush bool) io.Writer {
 }
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:7700", "TCP address to listen on")
-	sweep := flag.Duration("sweep", 60*time.Second, "how often idle buckets are evicted")
-	logPath := flag.String("log", "", "append logs, including every request, to this file")
-	flag.Parse()
+	addr := env("SIPLINE_ADDR", "127.0.0.1:7700")
+	sweep, err := time.ParseDuration(env("SIPLINE_SWEEP", "60s"))
+	if err != nil || sweep <= 0 {
+		log.Fatal("SIPLINE_SWEEP must be a positive duration like 60s")
+	}
+	logPath := os.Getenv("SIPLINE_LOG")
 	reqLog := log.New(io.Discard, "", 0)
-	if *logPath != "" {
-		f, err := os.OpenFile(*logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if logPath != "" {
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -98,15 +99,19 @@ func main() {
 			os.Exit(0)
 		}()
 	}
-	if *sweep <= 0 {
-		log.Fatal("--sweep must be positive")
-	}
-	ln, err := net.Listen("tcp", *addr)
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatal(err)
 	}
 	log.Printf("sipline listening on %s", ln.Addr())
-	log.Fatal(serve(ln, *sweep, reqLog))
+	log.Fatal(serve(ln, sweep, reqLog))
+}
+
+func env(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 func newServer() *server {

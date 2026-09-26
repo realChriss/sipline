@@ -40,7 +40,7 @@ git rev-parse -q --verify "refs/tags/$tag" >/dev/null && fail "$tag already exis
 
 printf '\n  This will:\n'
 [ "$1" = 0 ] || printf '    - push main to origin\n'
-printf '    - tag %s and push it, which builds and publishes a release\n' "$tag"
+printf '    - tag %s and push it, which publishes the binaries and the image\n' "$tag"
 printf '\n  Release %s? [y/N]: ' "$tag"
 read -r ok
 case $ok in
@@ -56,4 +56,5 @@ remote=$(git remote get-url origin)
 remote=${remote%.git}
 printf '  Pushed %s.\n\n' "$tag"
 printf '  Build:   %s/actions\n' "$remote"
-printf '  Release: %s/releases/tag/%s\n\n' "$remote" "$tag"
+printf '  Release: %s/releases/tag/%s\n' "$remote" "$tag"
+printf '  Image:   %s/pkgs/container/sipline\n\n' "$remote"

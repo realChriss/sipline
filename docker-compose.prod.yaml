@@ -1,0 +1,13 @@
+services:
+  sipline:
+    image: ghcr.io/realchriss/sipline:latest
+    restart: unless-stopped
+    environment:
+      SIPLINE_SWEEP: "60s"
+      # Uncomment to write the request log.
+      # SIPLINE_LOG: "/logs/sipline.log"
+    # volumes:
+    #   - ./logs:/logs
+    ports:
+      # No auth. To expose to the whole network, set to 0.0.0.0.
+      - "127.0.0.1:7700:7700"
