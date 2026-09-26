@@ -49,15 +49,7 @@ SIPLINE_SWEEP=30s ./sipline                             # run the binary
 
 ## Protocol
 
-Send one command per line and get one reply per line back, in order. You can pipeline commands.
-
-| Command | Reply |
-| --- | --- |
-| `CONFIG <limiter> <capacity> <refill_per_sec>` | `OK` |
-| `TAKE <limiter> <key>` | `ALLOW <remaining>` / `DENY <retry_ms>` |
-| `PING` | `PONG` |
-
-Errors are `ERR unknown command`, `ERR bad arguments`, `ERR unknown limiter`, `ERR too many limiters` and `ERR line too long` (the last one also closes the connection).
+Clients talk to the server with one line of text per command over a single TCP connection:
 
 ```
 > CONFIG api 3 1
@@ -66,10 +58,4 @@ Errors are `ERR unknown command`, `ERR bad arguments`, `ERR unknown limiter`, `E
 < ALLOW 2
 ```
 
-## Client rules
-
-All state is lost when the server restarts. Clients recover on their own if they do the following:
-
-- Send `CONFIG` for every limiter right after connecting, including after a reconnect.
-- If `TAKE` returns `ERR unknown limiter`, send `CONFIG` again and retry once.
-- If the server can't be reached, decide yourself whether to fail open or fail closed.
+[PROTOCOL.md](PROTOCOL.md) has every command, reply and error, plus the rules a client must follow to survive server restarts.
