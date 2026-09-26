@@ -1,9 +1,8 @@
-// Command sipline is a localhost token-bucket rate limiter speaking a line-based TCP protocol.
-// See SPEC.md for the protocol.
 package main
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,10 +11,13 @@ import (
 	"maps"
 	"math"
 	"net"
+	"os"
+	"os/signal"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -23,25 +25,71 @@ const maxLine = 1024
 
 type bucket struct {
 	tokens float64
-	last   time.Time // monotonic reading from time.Now
+	last   time.Time
 }
 
 type limiter struct {
 	mu       sync.Mutex
 	capacity float64
-	rate     float64 // tokens per second
+	rate     float64
 	buckets  map[string]*bucket
 }
 
 type server struct {
 	mu       sync.Mutex
 	limiters map[string]*limiter
+	log      *log.Logger
+}
+
+type logFile struct {
+	mu sync.Mutex
+	w  *bufio.Writer
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+func (l *logFile) writer(flush bool) io.Writer {
+	return writerFunc(func(p []byte) (int, error) {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		n, err := l.w.Write(p)
+		if err == nil && flush {
+			err = l.w.Flush()
+		}
+		return n, err
+	})
 }
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:7700", "TCP address to listen on")
 	sweep := flag.Duration("sweep", 60*time.Second, "how often idle buckets are evicted")
+	logPath := flag.String("log", "", "append logs, including every request, to this file")
 	flag.Parse()
+	reqLog := log.New(io.Discard, "", 0)
+	if *logPath != "" {
+		f, err := os.OpenFile(*logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			log.Fatal(err)
+		}
+		lf := &logFile{w: bufio.NewWriterSize(f, 64<<10)}
+		flush := lf.writer(true)
+		log.SetOutput(io.MultiWriter(os.Stderr, flush))
+		reqLog = log.New(lf.writer(false), "", log.LstdFlags)
+		go func() {
+			for range time.Tick(time.Second) {
+				flush.Write(nil)
+			}
+		}()
+		go func() {
+			stop := make(chan os.Signal, 1)
+			signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+			<-stop
+			flush.Write(nil)
+			os.Exit(0)
+		}()
+	}
 	if *sweep <= 0 {
 		log.Fatal("--sweep must be positive")
 	}
@@ -50,16 +98,16 @@ func main() {
 		log.Fatal(err)
 	}
 	log.Printf("sipline listening on %s", ln.Addr())
-	log.Fatal(serve(ln, *sweep))
+	log.Fatal(serve(ln, *sweep, reqLog))
 }
 
 func newServer() *server {
-	return &server{limiters: map[string]*limiter{}}
+	return &server{limiters: map[string]*limiter{}, log: log.New(io.Discard, "", 0)}
 }
 
-// serve accepts connections until ln is closed.
-func serve(ln net.Listener, sweep time.Duration) error {
+func serve(ln net.Listener, sweep time.Duration, reqLog *log.Logger) error {
 	s := newServer()
+	s.log = reqLog
 	go func() {
 		for now := range time.Tick(sweep) {
 			s.sweep(now)
@@ -70,7 +118,7 @@ func serve(ln net.Listener, sweep time.Duration) error {
 		if errors.Is(err, net.ErrClosed) {
 			return err
 		}
-		if err != nil { // e.g. out of file descriptors: back off instead of dying
+		if err != nil {
 			log.Print(err)
 			time.Sleep(100 * time.Millisecond)
 			continue
@@ -81,26 +129,30 @@ func serve(ln net.Listener, sweep time.Duration) error {
 
 func (s *server) handle(conn net.Conn) {
 	defer conn.Close()
-	sc := bufio.NewScanner(conn) // ScanLines drops a trailing \r
-	sc.Buffer(make([]byte, 0, maxLine+2), maxLine+2)
+	addr := conn.RemoteAddr()
+	s.log.Printf("%s connected", addr)
+	defer s.log.Printf("%s disconnected", addr)
+	r := bufio.NewReader(conn)
 	w := bufio.NewWriter(conn)
-	tooLong := false
-	for sc.Scan() {
-		if tooLong = len(sc.Bytes()) > maxLine; tooLong {
+	for {
+		line, err := r.ReadSlice('\n')
+		if err != nil && err != bufio.ErrBufferFull {
+			return
+		}
+		line = bytes.TrimSuffix(bytes.TrimSuffix(line, []byte("\n")), []byte("\r"))
+		if err == bufio.ErrBufferFull || len(line) > maxLine {
 			break
 		}
-		w.WriteString(s.exec(sc.Text(), time.Now()) + "\n")
-		// ponytail: flush per reply; flush only when no input is buffered if syscalls ever matter
-		if w.Flush() != nil {
+		reply := s.exec(string(line), time.Now())
+		s.log.Printf("%s %q %s", addr, line, reply)
+		w.WriteString(reply + "\n")
+		if buf, _ := r.Peek(r.Buffered()); bytes.IndexByte(buf, '\n') < 0 && w.Flush() != nil {
 			return
 		}
 	}
-	if !tooLong && !errors.Is(sc.Err(), bufio.ErrTooLong) {
-		return
-	}
-	conn.Write([]byte("ERR line too long\n"))
-	// Closing with unread input would send a RST and could discard the reply
-	// before the client reads it, so half-close and drain briefly first.
+	s.log.Printf("%s line too long", addr)
+	w.WriteString("ERR line too long\n")
+	w.Flush()
 	if tc, ok := conn.(*net.TCPConn); ok {
 		tc.CloseWrite()
 		tc.SetReadDeadline(time.Now().Add(time.Second))
@@ -108,7 +160,6 @@ func (s *server) handle(conn net.Conn) {
 	}
 }
 
-// exec runs one command line and returns the response without the newline.
 func (s *server) exec(line string, now time.Time) string {
 	const badArgs = "ERR bad arguments"
 	f := strings.Split(line, " ")
@@ -127,7 +178,6 @@ func (s *server) exec(line string, now time.Time) string {
 			return badArgs
 		}
 		rate, err := strconv.ParseFloat(f[3], 64)
-		// Also reject rates so small that retry_ms would overflow to +Inf.
 		if err != nil || !(rate > 0) || math.IsInf(rate, 0) || math.IsInf(1000/rate, 0) {
 			return badArgs
 		}
@@ -148,7 +198,6 @@ func (s *server) exec(line string, now time.Time) string {
 	return "ERR unknown command"
 }
 
-// validName reports whether s is 1–256 bytes with no spaces or control characters.
 func validName(s string) bool {
 	if len(s) < 1 || len(s) > 256 {
 		return false
@@ -161,8 +210,6 @@ func validName(s string) bool {
 	return true
 }
 
-// config creates or updates a limiter. Existing buckets are clamped to the
-// new capacity lazily, on their next take.
 func (s *server) config(name string, capacity, rate float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -184,7 +231,6 @@ func (l *limiter) take(key string, now time.Time) string {
 		b = &bucket{tokens: l.capacity, last: now}
 		l.buckets[key] = b
 	}
-	// now can trail b.last slightly when concurrent callers race for the lock.
 	if now.After(b.last) {
 		b.tokens += now.Sub(b.last).Seconds() * l.rate
 		b.last = now
@@ -197,8 +243,6 @@ func (l *limiter) take(key string, now time.Time) string {
 	return fmt.Sprintf("DENY %.0f", math.Ceil((1-b.tokens)/l.rate*1000))
 }
 
-// sweep drops buckets idle long enough to be full again; a returning key
-// gets a fresh full bucket, which is identical.
 func (s *server) sweep(now time.Time) {
 	s.mu.Lock()
 	ls := slices.Collect(maps.Values(s.limiters))

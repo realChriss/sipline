@@ -1,12 +1,12 @@
 # sipline
 
-A small in-memory token-bucket rate limiter. Apps on the same machine connect over TCP, send a key (usually a client IP) and get back whether the request is allowed. It's one Go binary that uses only the standard library. The full protocol and design are in [SPEC.md](SPEC.md).
+A small in-memory token-bucket rate limiter. Apps on the same machine connect over TCP, send a key (usually a client IP) and get back whether the request is allowed. It's one Go binary that uses only the standard library.
 
 ## Build
 
 ```sh
 go build .                                              # current platform
-powershell -ExecutionPolicy Bypass -File build.ps1      # all platforms -> dist/
+build.bat                                               # all platforms -> dist/
 go test ./...
 ```
 
@@ -16,7 +16,16 @@ go test ./...
 sipline                        # listens on 127.0.0.1:7700
 sipline --addr 0.0.0.0:7700    # accept remote clients (no auth! firewall it)
 sipline --sweep 30s            # evict idle buckets every 30s (default 60s)
+sipline --log sipline.log      # also append logs, including every request, to a file
 ```
+
+Without `--log`, the server prints only its startup line and errors to stderr. With `--log`, the file gets those lines plus one line per connection, disconnection and request:
+
+```
+2026/09/26 17:35:55 127.0.0.1:50344 "TAKE api 1.2.3.4" ALLOW 2
+```
+
+The file is written in batches and flushed every second and on Ctrl+C, so a crash can lose the last second of lines. There is no rotation, so the file grows until you delete or rotate it yourself. Request logging slows the server down under heavy load.
 
 ## Protocol
 
