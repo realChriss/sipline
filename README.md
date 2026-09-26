@@ -37,7 +37,11 @@ Send one command per line and get one reply per line back, in order. You can pip
 | `TAKE <limiter> <key>` | `ALLOW <remaining>` / `DENY <retry_ms>` |
 | `PING` | `PONG` |
 
-Errors are `ERR unknown command`, `ERR bad arguments`, `ERR unknown limiter` and `ERR line too long` (the last one also closes the connection).
+`capacity` and `refill_per_sec` are whole numbers from 1 to 1000000. Anything else, such as `0.5`, `1e3` or `+1`, is rejected. The server holds at most 1000 limiters and never deletes them.
+
+Errors are `ERR unknown command`, `ERR bad arguments`, `ERR unknown limiter`, `ERR too many limiters` and `ERR line too long` (the last one also closes the connection).
+
+The server accepts at most 1000 connections at once. Beyond that, a new connection gets `ERR too many connections` and is closed. Idle connections stay open; TCP keepalive closes connections to clients that have died.
 
 ```
 > CONFIG api 3 1

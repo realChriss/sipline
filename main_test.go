@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -35,9 +36,9 @@ func TestExec(t *testing.T) {
 		{0, "CONFIG race 3 1", "OK"},
 		{time.Second, "TAKE race k", "ALLOW 2"},
 		{0, "TAKE race k", "ALLOW 1"},
-		{0, "CONFIG slow 1 0.5", "OK"},
+		{0, "CONFIG slow 1 2", "OK"},
 		{0, "TAKE slow k", "ALLOW 0"},
-		{0, "TAKE slow k", "DENY 2000"},
+		{0, "TAKE slow k", "DENY 500"},
 		{0, "TAKE slow " + strings.Repeat("k", 256), "ALLOW 0"},
 		{0, "TAKE slow " + strings.Repeat("k", 257), "ERR bad arguments"},
 		{0, "TAKE slow a\tb", "ERR bad arguments"},
@@ -55,10 +56,40 @@ func TestExec(t *testing.T) {
 		{0, "CONFIG api 1 inf", "ERR bad arguments"},
 		{0, "CONFIG api 1 NaN", "ERR bad arguments"},
 		{0, "CONFIG api 1 1e-310", "ERR bad arguments"},
+		{0, "CONFIG api 1e3 1", "ERR bad arguments"},
+		{0, "CONFIG api 1 1e3", "ERR bad arguments"},
+		{0, "CONFIG api +5 1", "ERR bad arguments"},
+		{0, "CONFIG api 5 +1", "ERR bad arguments"},
+		{0, "CONFIG api 5 .5", "ERR bad arguments"},
+		{0, "CONFIG api 5 0.5", "ERR bad arguments"},
+		{0, "CONFIG api 5 5.", "ERR bad arguments"},
+		{0, "CONFIG api 5 5.0", "ERR bad arguments"},
+		{0, "CONFIG api 5 0x10", "ERR bad arguments"},
+		{0, "CONFIG api 1_000 1", "ERR bad arguments"},
+		{0, "CONFIG api 1000001 1", "ERR bad arguments"},
+		{0, "CONFIG api 5 1000001", "ERR bad arguments"},
+		{0, "CONFIG api 99999999999999999999 1", "ERR bad arguments"},
+		{0, "CONFIG api 1000000 1000000", "OK"},
+		{0, "CONFIG api 007 002", "OK"},
 	} {
 		if got := s.exec(c.in, t0.Add(c.at)); got != c.want {
 			t.Errorf("%q at %v: got %q, want %q", c.in, c.at, got, c.want)
 		}
+	}
+}
+
+func TestMaxLimiters(t *testing.T) {
+	s := newServer()
+	for i := range maxLimiters {
+		if got := s.exec(fmt.Sprintf("CONFIG l%d 1 1", i), time.Now()); got != "OK" {
+			t.Fatalf("limiter %d: got %q", i, got)
+		}
+	}
+	if got := s.exec("CONFIG extra 1 1", time.Now()); got != "ERR too many limiters" {
+		t.Fatalf("extra limiter: got %q", got)
+	}
+	if got := s.exec("CONFIG l0 2 2", time.Now()); got != "OK" {
+		t.Fatalf("update existing: got %q", got)
 	}
 }
 
@@ -72,6 +103,48 @@ func TestSweep(t *testing.T) {
 	b := s.limiters["api"].buckets
 	if b["old"] != nil || b["new"] == nil {
 		t.Fatalf("after sweep: old=%v new=%v", b["old"], b["new"])
+	}
+}
+
+func TestMaxConns(t *testing.T) {
+	defer func(n int) { maxConns = n }(maxConns)
+	maxConns = 1
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go serve(ln, time.Minute, log.New(io.Discard, "", 0))
+	ping := func() string {
+		c, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.SetDeadline(time.Now().Add(5 * time.Second))
+		io.WriteString(c, "PING\n")
+		got, _ := bufio.NewReader(c).ReadString('\n')
+		c.Close()
+		return got
+	}
+	first, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.SetDeadline(time.Now().Add(5 * time.Second))
+	r := bufio.NewReader(first)
+	io.WriteString(first, "PING\n")
+	if got, _ := r.ReadString('\n'); got != "PONG\n" {
+		t.Fatalf("first: got %q", got)
+	}
+	if got := ping(); got != "ERR too many connections\n" {
+		t.Fatalf("second: got %q", got)
+	}
+	first.Close()
+	for i := 0; ping() != "PONG\n"; i++ {
+		if i == 50 {
+			t.Fatal("slot not released after close")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

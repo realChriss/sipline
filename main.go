@@ -21,11 +21,19 @@ import (
 	"time"
 )
 
-const maxLine = 1024
+const (
+	maxLine     = 1024
+	maxLimiters = 1000
+	maxNumber   = 1_000_000
+)
+
+var epoch = time.Now()
+
+var maxConns = 1000
 
 type bucket struct {
 	tokens float64
-	last   time.Time
+	last   time.Duration
 }
 
 type limiter struct {
@@ -108,6 +116,7 @@ func newServer() *server {
 func serve(ln net.Listener, sweep time.Duration, reqLog *log.Logger) error {
 	s := newServer()
 	s.log = reqLog
+	slots := make(chan struct{}, maxConns)
 	go func() {
 		for now := range time.Tick(sweep) {
 			s.sweep(now)
@@ -123,7 +132,28 @@ func serve(ln net.Listener, sweep time.Duration, reqLog *log.Logger) error {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		go s.handle(conn)
+		select {
+		case slots <- struct{}{}:
+			go func() {
+				defer func() { <-slots }()
+				s.handle(conn)
+			}()
+		default:
+			s.log.Printf("%s rejected: too many connections", conn.RemoteAddr())
+			go func() {
+				defer conn.Close()
+				io.WriteString(conn, "ERR too many connections\n")
+				drain(conn)
+			}()
+		}
+	}
+}
+
+func drain(conn net.Conn) {
+	if tc, ok := conn.(*net.TCPConn); ok {
+		tc.CloseWrite()
+		tc.SetReadDeadline(time.Now().Add(time.Second))
+		io.Copy(io.Discard, tc)
 	}
 }
 
@@ -153,11 +183,7 @@ func (s *server) handle(conn net.Conn) {
 	s.log.Printf("%s line too long", addr)
 	w.WriteString("ERR line too long\n")
 	w.Flush()
-	if tc, ok := conn.(*net.TCPConn); ok {
-		tc.CloseWrite()
-		tc.SetReadDeadline(time.Now().Add(time.Second))
-		io.Copy(io.Discard, tc)
-	}
+	drain(conn)
 }
 
 func (s *server) exec(line string, now time.Time) string {
@@ -173,15 +199,14 @@ func (s *server) exec(line string, now time.Time) string {
 		if len(f) != 4 || !validName(f[1]) {
 			return badArgs
 		}
-		capacity, err := strconv.ParseInt(f[2], 10, 64)
-		if err != nil || capacity <= 0 {
+		capacity, okCapacity := count(f[2])
+		rate, okRate := count(f[3])
+		if !okCapacity || !okRate {
 			return badArgs
 		}
-		rate, err := strconv.ParseFloat(f[3], 64)
-		if err != nil || !(rate > 0) || math.IsInf(rate, 0) || math.IsInf(1000/rate, 0) {
-			return badArgs
+		if !s.config(f[1], capacity, rate) {
+			return "ERR too many limiters"
 		}
-		s.config(f[1], float64(capacity), rate)
 		return "OK"
 	case "TAKE":
 		if len(f) != 3 || !validName(f[1]) || !validName(f[2]) {
@@ -210,30 +235,40 @@ func validName(s string) bool {
 	return true
 }
 
-func (s *server) config(name string, capacity, rate float64) {
+func count(s string) (float64, bool) {
+	n, err := strconv.Atoi(s)
+	return float64(n), err == nil && strings.Trim(s, "0123456789") == "" && n >= 1 && n <= maxNumber
+}
+
+func (s *server) config(name string, capacity, rate float64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	l := s.limiters[name]
 	if l == nil {
+		if len(s.limiters) >= maxLimiters {
+			return false
+		}
 		l = &limiter{buckets: map[string]*bucket{}}
 		s.limiters[name] = l
 	}
 	l.mu.Lock()
 	l.capacity, l.rate = capacity, rate
 	l.mu.Unlock()
+	return true
 }
 
 func (l *limiter) take(key string, now time.Time) string {
+	t := now.Sub(epoch)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	b := l.buckets[key]
 	if b == nil {
-		b = &bucket{tokens: l.capacity, last: now}
-		l.buckets[key] = b
+		b = &bucket{tokens: l.capacity, last: t}
+		l.buckets[strings.Clone(key)] = b
 	}
-	if now.After(b.last) {
-		b.tokens += now.Sub(b.last).Seconds() * l.rate
-		b.last = now
+	if t > b.last {
+		b.tokens += (t - b.last).Seconds() * l.rate
+		b.last = t
 	}
 	b.tokens = min(b.tokens, l.capacity)
 	if b.tokens >= 1 {
@@ -247,12 +282,20 @@ func (s *server) sweep(now time.Time) {
 	s.mu.Lock()
 	ls := slices.Collect(maps.Values(s.limiters))
 	s.mu.Unlock()
+	t := now.Sub(epoch)
 	for _, l := range ls {
 		l.mu.Lock()
+		deleted := 0
 		for k, b := range l.buckets {
-			if now.Sub(b.last).Seconds() >= l.capacity/l.rate {
+			if (t - b.last).Seconds() >= l.capacity/l.rate {
 				delete(l.buckets, k)
+				deleted++
 			}
+		}
+		if deleted > len(l.buckets) {
+			m := make(map[string]*bucket, len(l.buckets))
+			maps.Copy(m, l.buckets)
+			l.buckets = m
 		}
 		l.mu.Unlock()
 	}
