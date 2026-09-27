@@ -55,11 +55,4 @@ If the connection drops, commands still waiting for a reply fail right away, and
 
 ## Development
 
-The tests build and run the real Go server, so Go must be installed.
-
-```sh
-bun install
-bun run test       # type check + tests
-bun run build      # -> dist/
-bun publish        # runs the tests and the build first
-```
+See [DEVELOPMENT.md](https://github.com/realChriss/sipline/blob/main/clients/ts/DEVELOPMENT.md) for building, testing and publishing.
