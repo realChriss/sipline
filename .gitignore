@@ -1,3 +1,4 @@
 dist/
 *.exe
 *.log
+node_modules/
