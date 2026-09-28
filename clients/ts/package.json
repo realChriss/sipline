@@ -1,6 +1,6 @@
 {
   "name": "sipline",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Client and Express/Fastify middleware for the sipline rate limiter",
   "license": "MIT",
   "keywords": ["rate-limit", "rate-limiter", "token-bucket", "express", "fastify", "middleware"],

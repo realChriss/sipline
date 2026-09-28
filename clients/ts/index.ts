@@ -13,6 +13,8 @@ export interface SiplineOptions<Req = any> {
   refillPerSec: number;
   /** Builds the bucket key from a request. Default: the client IP. */
   key?: (req: Req) => string | Promise<string>;
+  /** Return true to let a request through without limiting it. Runs before `key`. Default: never skip. */
+  skip?: (req: Req) => boolean | Promise<boolean>;
   /** Let requests through when the server can't be reached. Default true. */
   failOpen?: boolean;
   /** Per-command timeout; on expiry the connection is dropped and rebuilt. Default 1000. */
@@ -40,6 +42,7 @@ export class Sipline<Req = any> {
   private readonly name: string;
   private readonly configLine: string;
   private readonly key: (req: Req) => string | Promise<string>;
+  private readonly skip: (req: Req) => boolean | Promise<boolean>;
   private readonly failOpen: boolean;
   private readonly timeoutMs: number;
   private readonly onError: (err: Error) => void;
@@ -61,6 +64,7 @@ export class Sipline<Req = any> {
     this.name = opts.name;
     this.configLine = `CONFIG ${opts.name} ${opts.capacity} ${opts.refillPerSec}`;
     this.key = opts.key ?? ((req: any) => req.ip ?? req.socket?.remoteAddress);
+    this.skip = opts.skip ?? (() => false);
     this.failOpen = opts.failOpen ?? true;
     this.timeoutMs = opts.timeoutMs ?? 1000;
     this.onError = opts.onError ?? ((err) => console.error(`sipline: ${err.message}`));
@@ -85,21 +89,23 @@ export class Sipline<Req = any> {
    * Answers 429 with Retry-After when denied, 503 when the server is down and failOpen is false.
    */
   middleware = (req: Req, res: any, next: (err?: Error) => void): void => {
-    Promise.resolve()
-      .then(() => this.key(req))
-      .then((key) => {
-        if (!validName(key)) throw new TypeError(`sipline: key function returned invalid key ${JSON.stringify(key)}`);
-        return this.take(key).catch(() => null);
-      })
-      .then((r) => {
-        if (r ? r.allowed : this.failOpen) return next();
-        const status = r ? 429 : 503;
-        const headers: Record<string, string> = r ? { "Retry-After": String(Math.ceil(r.retryAfterMs / 1000)) } : {};
-        const body = r ? "Too Many Requests" : "Service Unavailable";
-        if (typeof res.code === "function") res.code(status).headers(headers).send(body); // fastify reply
-        else res.writeHead(status, headers).end(body); // express / node:http response
-      }, next);
+    this.check(req).then((r) => {
+      if (r === "skip" || (r ? r.allowed : this.failOpen)) return next();
+      const status = r ? 429 : 503;
+      const headers: Record<string, string> = r ? { "Retry-After": String(Math.ceil(r.retryAfterMs / 1000)) } : {};
+      const body = r ? "Too Many Requests" : "Service Unavailable";
+      if (typeof res.code === "function") res.code(status).headers(headers).send(body); // fastify reply
+      else res.writeHead(status, headers).end(body); // express / node:http response
+    }, next);
   };
+
+  /** "skip" when the request is exempt, null when the server couldn't answer. */
+  private async check(req: Req): Promise<TakeResult | null | "skip"> {
+    if (await this.skip(req)) return "skip";
+    const key = await this.key(req);
+    if (!validName(key)) throw new TypeError(`sipline: key function returned invalid key ${JSON.stringify(key)}`);
+    return this.take(key).catch(() => null);
+  }
 
   /** Closes the connection and stops reconnecting. */
   close(): void {

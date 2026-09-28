@@ -125,6 +125,92 @@ test("key function errors go to the framework error handler", async () => {
   l.close();
 });
 
+test("skip lets requests through without calling key or the server", async () => {
+  const l = new Sipline<express.Request>({
+    port, name: "skip", capacity: 1, refillPerSec: 1, ...quiet,
+    // An invalid key would answer 500, so a 200 on /health proves key never ran.
+    key: (req) => (req.path === "/health" ? "a b" : "k"),
+    skip: async (req) => req.path === "/health",
+  });
+  const app = express();
+  app.use(l.middleware);
+  app.get("/", (_req, res) => { res.send("ok"); });
+  app.get("/health", (_req, res) => { res.send("ok"); });
+  const http = app.listen(0);
+  await new Promise((r) => http.once("listening", r));
+  const url = `http://127.0.0.1:${(http.address() as any).port}`;
+
+  for (let i = 0; i < 3; i++) expect((await fetch(`${url}/health`)).status).toBe(200);
+  expect((await fetch(`${url}/`)).status).toBe(200);
+  expect((await fetch(`${url}/`)).status).toBe(429);
+  http.close();
+  l.close();
+});
+
+test("skip errors go to the framework error handler", async () => {
+  const l = new Sipline({
+    port, name: "badskip", capacity: 1, refillPerSec: 1, ...quiet,
+    skip: () => { throw new Error("boom"); },
+  });
+  const app = express();
+  app.use(l.middleware);
+  app.get("/", (_req, res) => { res.send("ok"); });
+  const http = app.listen(0);
+  await new Promise((r) => http.once("listening", r));
+  expect((await fetch(`http://127.0.0.1:${(http.address() as any).port}/`)).status).toBe(500);
+  http.close();
+  l.close();
+});
+
+test("fastify routes can opt out through route config", async () => {
+  const l = new Sipline({
+    port, name: "fastify-skip", capacity: 1, refillPerSec: 1, ...quiet,
+    skip: (req) => req.routeOptions?.config?.sipline === false,
+  });
+  const app = Fastify();
+  app.addHook("onRequest", l.middleware);
+  app.get("/", async () => "ok");
+  app.get("/health", { config: { sipline: false } }, async () => "ok");
+  const url = await app.listen({ port: 0, host: "127.0.0.1" });
+
+  for (let i = 0; i < 3; i++) expect((await fetch(`${url}/health`)).status).toBe(200);
+  expect((await fetch(`${url}/`)).status).toBe(200);
+  expect((await fetch(`${url}/`)).status).toBe(429);
+  await app.close();
+  l.close();
+});
+
+test("express and fastify can limit only some routes", async () => {
+  const l = new Sipline({ port, name: "scoped-express", capacity: 1, refillPerSec: 1, ...quiet });
+  const fl = new Sipline({ port, name: "scoped-fastify", capacity: 1, refillPerSec: 1, ...quiet });
+
+  const app = express();
+  app.use("/api", l.middleware);
+  app.get("/api/items", (_req, res) => { res.send("ok"); });
+  app.get("/health", (_req, res) => { res.send("ok"); });
+  const http = app.listen(0);
+  await new Promise((r) => http.once("listening", r));
+  const eurl = `http://127.0.0.1:${(http.address() as any).port}`;
+  for (let i = 0; i < 3; i++) expect((await fetch(`${eurl}/health`)).status).toBe(200);
+  expect((await fetch(`${eurl}/api/items`)).status).toBe(200);
+  expect((await fetch(`${eurl}/api/items`)).status).toBe(429);
+  http.close();
+
+  const f = Fastify();
+  await f.register(async (api) => {
+    api.addHook("onRequest", fl.middleware);
+    api.get("/items", async () => "ok");
+  }, { prefix: "/api" });
+  f.get("/health", async () => "ok");
+  const furl = await f.listen({ port: 0, host: "127.0.0.1" });
+  for (let i = 0; i < 3; i++) expect((await fetch(`${furl}/health`)).status).toBe(200);
+  expect((await fetch(`${furl}/api/items`)).status).toBe(200);
+  expect((await fetch(`${furl}/api/items`)).status).toBe(429);
+  await f.close();
+  l.close();
+  fl.close();
+});
+
 test("failOpen decides what happens when the server is unreachable", async () => {
   const dead = { port: 1, name: "dead", capacity: 1, refillPerSec: 1, ...quiet };
   const open = new Sipline(dead);
