@@ -1,6 +1,6 @@
 # sipline
 
-A small in-memory token-bucket rate limiter. Apps on the same machine connect over TCP, send a key (usually a client IP) and get back whether the request is allowed. It's one Go binary that uses only the standard library.
+A small in-memory token-bucket rate limiter.
 
 ## Run with Docker Compose
 
